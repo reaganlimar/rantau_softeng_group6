@@ -367,7 +367,7 @@ function communitiesView() {
         <button class="btn" data-action="reset-search">Reset</button>
       </div>
       <div class="community-grid">
-        ${filtered.map(communityCard).join("") || `<div class="panel"><h3>Belum ada komunitas</h3><p class="subtle">Data komunitas akan tampil setelah tersedia dari backend.</p></div>`}
+        ${filtered.map(communityCard).join("") || `<div class="panel"><h3>Belum ada komunitas</h3></div>`}
       </div>
       <div class="panel status-note">
         <h3>Filter aktif: ${state.activeFilter === "Semua" ? "Semua komunitas" : state.activeFilter}</h3>
