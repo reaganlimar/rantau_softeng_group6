@@ -99,10 +99,11 @@ function communityArt(category = "") {
 }
 
 function memberCount(communityId) {
-  return database.prepare("SELECT state_json FROM users").all().reduce((total, row) => {
+  const community = database.prepare("SELECT created_by FROM communities WHERE id = ?").get(communityId);
+  return database.prepare("SELECT username, state_json FROM users").all().reduce((total, row) => {
     try {
       const parsed = JSON.parse(row.state_json);
-      return total + (parsed.joined?.includes(communityId) ? 1 : 0);
+      return total + (parsed.joined?.includes(communityId) || community?.created_by === row.username ? 1 : 0);
     } catch {
       return total;
     }
@@ -110,10 +111,12 @@ function memberCount(communityId) {
 }
 
 function membersForCommunity(communityId) {
+  const community = database.prepare("SELECT created_by FROM communities WHERE id = ?").get(communityId);
   return database.prepare("SELECT username, state_json FROM users").all().map((row) => {
     try {
       const parsed = JSON.parse(row.state_json);
-      if (!parsed.joined?.includes(communityId) || parsed.settings?.visible === false) return null;
+      const isMember = parsed.joined?.includes(communityId) || community?.created_by === row.username;
+      if (!isMember || parsed.settings?.visible === false) return null;
       return {
         username: row.username,
         name: parsed.profile?.name || row.username,
@@ -221,21 +224,6 @@ function insertMessage(communityId, user, text) {
     INSERT INTO messages (id, community_id, username, name, text)
     VALUES (?, ?, ?, ?, ?)
   `).run(randomUUID(), communityId, user.username, senderName, text);
-}
-
-function insertSystemReply(communityId, user) {
-  if (user.state.settings?.autoReply === false) return;
-  const community = getCommunity(communityId);
-  database.prepare(`
-    INSERT INTO messages (id, community_id, username, name, text)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(
-    randomUUID(),
-    communityId,
-    "system",
-    "RantaU",
-    `Pesan kamu sudah masuk ke ${community?.name || "komunitas"}. Anggota lain bisa membalas di ruang chat ini.`
-  );
 }
 
 function sendJson(res, status, data) {
@@ -372,7 +360,6 @@ async function handleApi(req, res) {
     if (!getCommunity(communityId)) return sendJson(res, 404, { error: "Community not found." });
 
     insertMessage(communityId, user, text.trim());
-    insertSystemReply(communityId, user);
     return sendJson(res, 201, { messages: messagesForCommunity(communityId) });
   }
 

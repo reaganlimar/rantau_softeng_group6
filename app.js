@@ -19,7 +19,6 @@ const initialState = {
   settings: {
     notification: true,
     visible: true,
-    autoReply: true,
     localData: true
   },
   profile: {
@@ -447,6 +446,7 @@ function chip(name) {
 
 function communityCard(community) {
   const status = communityStatus(community.id);
+  const owner = isOwner(community);
   return html`
     <article class="community-card card">
       <div class="community-art ${community.art || "lavender"}"></div>
@@ -455,7 +455,7 @@ function communityCard(community) {
       <div class="tag-row">
         <span class="tag">${community.category}</span>
         <span class="tag">${communityMatch(community)}% cocok</span>
-        <span class="tag">${status}</span>
+        <span class="tag">${owner ? "owner" : status}</span>
       </div>
       <div class="card-actions">
         <button class="btn primary" data-route="community-detail" data-community="${community.id}">Lihat</button>
@@ -466,6 +466,7 @@ function communityCard(community) {
 }
 
 function communityActionButton(community) {
+  if (isOwner(community)) return `<button class="btn gold" data-route="chat" data-community="${community.id}">Kelola</button>`;
   if (state.joined.includes(community.id)) return `<button class="btn gold" data-route="chat" data-community="${community.id}">Chat</button>`;
   if (state.saved.includes(community.id)) return `<button class="btn" data-action="toggle-save" data-community="${community.id}">Unsave</button>`;
   return `<button class="btn primary" data-action="join-community" data-community="${community.id}">Gabung</button>`;
@@ -475,7 +476,8 @@ function communityDetail() {
   const community = communityById(state.routeParams.community);
   if (!community) return shell(emptyPanel("Data komunitas belum tersedia", "Detail komunitas akan tampil setelah backend menyediakan data komunitas."), "Communities");
   const saved = state.saved.includes(community.id);
-  const joined = state.joined.includes(community.id);
+  const owner = isOwner(community);
+  const joined = owner || state.joined.includes(community.id);
   return shell(html`
     <section class="view wide">
       <h1>${community.name}</h1>
@@ -485,9 +487,9 @@ function communityDetail() {
           <div class="detail-image ${community.art || "lavender"}"></div>
           <div class="actions" style="margin-top: 28px">
             ${joined
-              ? `<button class="btn primary" data-route="chat" data-community="${community.id}">Mulai Chat</button>`
+              ? `<button class="btn primary" data-route="chat" data-community="${community.id}">${owner ? "Kelola Chat" : "Mulai Chat"}</button>`
               : `<button class="btn primary" data-action="join-community" data-community="${community.id}">Gabung komunitas</button>`}
-            ${joined ? `<button class="btn pink" data-action="leave-community" data-community="${community.id}">Keluar komunitas</button>` : ""}
+            ${joined && !owner ? `<button class="btn pink" data-action="leave-community" data-community="${community.id}">Keluar komunitas</button>` : ""}
             <button class="btn gold" data-action="toggle-save" data-community="${community.id}">${saved ? "Tersimpan" : "Simpan"}</button>
             <button class="btn ${state.rsvps.includes(community.id) ? "mint" : ""}" data-action="toggle-rsvp" data-community="${community.id}">
               ${state.rsvps.includes(community.id) ? "Ikut event" : "Daftar event"}
@@ -601,7 +603,6 @@ function settings() {
         <h1>Settings</h1>
         ${settingRow("Notification", "On", "notification")}
         ${settingRow("Profile visible", "Community only", "visible")}
-        ${settingRow("Auto reply chat", "On", "autoReply")}
         ${settingRow("Save local data", "On", "localData")}
         <div class="actions" style="margin-top: 30px">
           <button class="btn pink" data-action="logout">Logout</button>
@@ -622,6 +623,10 @@ function settingRow(label, value, key) {
       </button>
     </div>
   `;
+}
+
+function isOwner(community) {
+  return community?.createdBy === state.profile.username;
 }
 
 function chat() {
@@ -1034,8 +1039,9 @@ document.addEventListener("submit", async (event) => {
         body: JSON.stringify({ community })
       });
       syncCommunities(result.communities);
+      if (!state.joined.includes(result.community.id)) state.joined.push(result.community.id);
       saveState();
-      setRoute("community-detail", { community: result.community.id });
+      setRoute("chat", { community: result.community.id });
     } catch (error) {
       showError(form, error.message || "Komunitas belum bisa dibuat.");
     }
