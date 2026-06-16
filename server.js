@@ -30,6 +30,29 @@ async function ensureDb() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS communities (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL,
+      city TEXT NOT NULL,
+      next_event TEXT,
+      location TEXT,
+      reasons_json TEXT NOT NULL DEFAULT '[]',
+      description TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      community_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      name TEXT NOT NULL,
+      text TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (community_id) REFERENCES communities(id)
+    );
   `);
 }
 
@@ -72,6 +95,69 @@ function renameUser(oldUsername, newUsername) {
     SET username = ?, updated_at = CURRENT_TIMESTAMP
     WHERE username = ?
   `).run(newUsername, oldUsername);
+}
+
+function communityFromRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    category: row.category,
+    city: row.city,
+    art: "",
+    nextEvent: row.next_event || "",
+    location: row.location || "",
+    reasons: JSON.parse(row.reasons_json || "[]"),
+    description: row.description,
+    createdBy: row.created_by
+  };
+}
+
+function allCommunities() {
+  return database.prepare("SELECT * FROM communities ORDER BY created_at DESC").all().map(communityFromRow);
+}
+
+function getCommunity(id) {
+  const row = database.prepare("SELECT * FROM communities WHERE id = ?").get(id);
+  return row ? communityFromRow(row) : null;
+}
+
+function insertCommunity(community, username) {
+  database.prepare(`
+    INSERT INTO communities (id, name, category, city, next_event, location, reasons_json, description, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    community.id,
+    community.name,
+    community.category,
+    community.city,
+    community.nextEvent || "",
+    community.location || "",
+    JSON.stringify(community.reasons || []),
+    community.description,
+    username
+  );
+}
+
+function messagesForCommunity(communityId) {
+  return database.prepare(`
+    SELECT id, community_id, username, name, text, created_at
+    FROM messages
+    WHERE community_id = ?
+    ORDER BY created_at ASC
+  `).all(communityId).map((row) => ({
+    id: row.id,
+    from: row.username,
+    name: row.name,
+    text: row.text,
+    time: new Date(row.created_at).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })
+  }));
+}
+
+function insertMessage(communityId, user, text) {
+  database.prepare(`
+    INSERT INTO messages (id, community_id, username, name, text)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(randomUUID(), communityId, user.username, user.state.profile.name || user.username, text);
 }
 
 function sendJson(res, status, data) {
@@ -134,7 +220,7 @@ async function handleApi(req, res) {
     const token = req.headers.authorization?.replace("Bearer ", "");
     const user = getUserByToken(token);
     if (!user) return sendJson(res, 401, { error: "Not logged in." });
-    return sendJson(res, 200, { state: publicState(user) });
+    return sendJson(res, 200, { state: publicState(user), communities: allCommunities() });
   }
 
   if (req.method === "PUT" && url.pathname === "/api/state") {
@@ -162,7 +248,47 @@ async function handleApi(req, res) {
       user.username = newUsername;
     }
     updateUser(user.username, user);
-    return sendJson(res, 200, { state: publicState(user) });
+    return sendJson(res, 200, { state: publicState(user), communities: allCommunities() });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/communities") {
+    return sendJson(res, 200, { communities: allCommunities() });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/communities") {
+    const token = req.headers.authorization?.replace("Bearer ", "");
+    const user = getUserByToken(token);
+    if (!user) return sendJson(res, 401, { error: "Not logged in." });
+
+    const body = await readBody(req);
+    const community = body.community;
+    if (!community?.name || !community?.category || !community?.city || !community?.description) {
+      return sendJson(res, 400, { error: "Community name, category, city, and description are required." });
+    }
+    if (getCommunity(community.id)) return sendJson(res, 409, { error: "Community already exists." });
+
+    insertCommunity(community, user.username);
+    return sendJson(res, 201, { community: getCommunity(community.id), communities: allCommunities() });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/messages") {
+    const communityId = url.searchParams.get("community");
+    if (!communityId) return sendJson(res, 400, { error: "Community id is required." });
+    return sendJson(res, 200, { messages: messagesForCommunity(communityId) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/messages") {
+    const token = req.headers.authorization?.replace("Bearer ", "");
+    const user = getUserByToken(token);
+    if (!user) return sendJson(res, 401, { error: "Not logged in." });
+
+    const body = await readBody(req);
+    const { communityId, text } = body;
+    if (!communityId || !text?.trim()) return sendJson(res, 400, { error: "Community and message are required." });
+    if (!getCommunity(communityId)) return sendJson(res, 404, { error: "Community not found." });
+
+    insertMessage(communityId, user, text.trim());
+    return sendJson(res, 201, { messages: messagesForCommunity(communityId) });
   }
 
   return sendJson(res, 404, { error: "API route not found." });

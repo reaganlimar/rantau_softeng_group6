@@ -53,8 +53,36 @@ async function apiRequest(path, options = {}) {
 function applyServerState(nextState) {
   state = mergeDeep(structuredClone(initialState), nextState);
   state.isLoggedIn = true;
-  communities = state.communities;
+  communities = state.communities || [];
   localStorage.setItem(storageKey, JSON.stringify(state));
+}
+
+function syncCommunities(nextCommunities) {
+  communities = nextCommunities || [];
+  state.communities = communities;
+  localStorage.setItem(storageKey, JSON.stringify(state));
+}
+
+async function loadCommunities() {
+  try {
+    const result = await apiRequest("/api/communities");
+    syncCommunities(result.communities);
+  } catch (error) {
+    console.warn("Community load failed", error);
+  }
+}
+
+async function loadMessages(communityId) {
+  try {
+    const result = await apiRequest(`/api/messages?community=${encodeURIComponent(communityId)}`);
+    const previous = JSON.stringify(state.messages[communityId] || []);
+    const next = JSON.stringify(result.messages);
+    state.messages[communityId] = result.messages;
+    localStorage.setItem(storageKey, JSON.stringify(state));
+    if (previous !== next && state.route === "chat" && state.routeParams.community === communityId) render();
+  } catch (error) {
+    console.warn("Message load failed", error);
+  }
 }
 
 function loadState() {
@@ -96,6 +124,7 @@ function setRoute(route, params = {}) {
   window.location.hash = buildHash(route, params);
   saveState();
   render();
+  if (route === "chat" && params.community && apiToken) loadMessages(params.community);
   window.scrollTo({ top: 0, left: 0 });
 }
 
@@ -410,9 +439,8 @@ function communityCard(community) {
 
 function communityActionButton(community) {
   if (state.joined.includes(community.id)) return `<button class="btn gold" data-route="chat" data-community="${community.id}">Chat</button>`;
-  if (state.requests[community.id] === "pending") return `<button class="btn gold" data-route="request-sent" data-community="${community.id}">Status</button>`;
   if (state.saved.includes(community.id)) return `<button class="btn" data-action="toggle-save" data-community="${community.id}">Unsave</button>`;
-  return `<button class="btn primary" data-action="send-request" data-community="${community.id}">Request</button>`;
+  return `<button class="btn primary" data-action="join-community" data-community="${community.id}">Gabung</button>`;
 }
 
 function communityDetail() {
@@ -420,7 +448,6 @@ function communityDetail() {
   if (!community) return shell(emptyPanel("Data komunitas belum tersedia", "Detail komunitas akan tampil setelah backend menyediakan data komunitas."), "Communities");
   const saved = state.saved.includes(community.id);
   const joined = state.joined.includes(community.id);
-  const pending = state.requests[community.id] === "pending";
   return shell(html`
     <section class="view wide">
       <h1>${community.name}</h1>
@@ -431,9 +458,7 @@ function communityDetail() {
           <div class="actions" style="margin-top: 28px">
             ${joined
               ? `<button class="btn primary" data-route="chat" data-community="${community.id}">Mulai Chat</button>`
-              : pending
-                ? `<button class="btn gold" data-route="request-sent" data-community="${community.id}">Lihat status</button>`
-                : `<button class="btn primary" data-action="send-request" data-community="${community.id}">Kirim Permintaan</button>`}
+              : `<button class="btn primary" data-action="join-community" data-community="${community.id}">Gabung komunitas</button>`}
             <button class="btn gold" data-action="toggle-save" data-community="${community.id}">${saved ? "Tersimpan" : "Simpan"}</button>
             <button class="btn ${state.rsvps.includes(community.id) ? "mint" : ""}" data-action="toggle-rsvp" data-community="${community.id}">
               ${state.rsvps.includes(community.id) ? "Ikut event" : "Daftar event"}
@@ -450,30 +475,6 @@ function communityDetail() {
         <p class="subtle">${community.description || "Deskripsi belum tersedia."}</p>
         <h3>Next event</h3>
         <p class="subtle">${community.nextEvent || "Event belum tersedia"}${community.location ? ` &bull; ${community.location}` : ""}</p>
-      </div>
-    </section>
-  `, "Communities");
-}
-
-function requestSent() {
-  const community = communityById(state.routeParams.community);
-  if (!community) return shell(emptyPanel("Request belum tersedia", "Data request akan tampil setelah ada komunitas yang dipilih."), "Communities");
-  return shell(html`
-    <section class="view wide">
-      <h1>Request terkirim</h1>
-      <div class="request-grid">
-        <div class="panel">
-          <h2>${community.name}</h2>
-          <p class="subtle">Permintaan kamu sudah masuk ke sistem dan tersimpan di browser ini.</p>
-          <div class="list-line"><span class="check">OK</span><span>Profil dasar valid</span><span></span></div>
-          <div class="list-line"><span class="check" style="background: var(--gold)">...</span><span>Menunggu admin komunitas</span><span></span></div>
-        </div>
-        <div class="status-card sent-card"><div><strong>Sent</strong><span>${state.settings.notification ? "notifikasi aktif" : "notifikasi off"}</span></div></div>
-      </div>
-      <div class="actions" style="margin-top: 26px">
-        <button class="btn primary" data-action="approve-request" data-community="${community.id}">Simulasikan diterima</button>
-        <button class="btn gold" data-route="notifications">Lihat notifikasi</button>
-        <button class="btn pink" data-action="cancel-request" data-community="${community.id}">Batal request</button>
       </div>
     </section>
   `, "Communities");
@@ -542,13 +543,6 @@ function notifications() {
 
 function notificationsData() {
   const dynamic = [];
-  Object.entries(state.requests).forEach(([id, status]) => {
-    const community = communityById(id);
-    if (!community) return;
-    if (status === "pending") {
-      dynamic.push({ id: `request-${id}`, title: "Permintaan terkirim", copy: `Request kamu ke ${community.name} sedang diverifikasi.`, tone: "mint", route: "request-sent", community: id });
-    }
-  });
   state.joined.forEach((id) => {
     const community = communityById(id);
     if (community) dynamic.push({ id: `accepted-${id}`, title: "Kamu diterima", copy: `Kamu sudah masuk ke ${community.name}.`, tone: "gold", route: "accepted", community: id });
@@ -602,6 +596,7 @@ function chat() {
   const community = communityById(state.routeParams.community) || communityById(state.joined[0]);
   if (!community) return shell(emptyPanel("Chat belum tersedia", "Chat akan aktif setelah user bergabung dengan komunitas."), "Chat");
   const messages = state.messages[community.id] || [];
+  if (apiToken && !state.messages[community.id]) loadMessages(community.id);
   return shell(html`
     <section class="view wide">
       <div class="chat-panel panel">
@@ -620,7 +615,9 @@ function chat() {
 }
 
 function chatBubble(message) {
-  return `<div class="chat-bubble ${message.from === "me" ? "me" : ""}">${escapeHtml(message.text)}<span>${escapeHtml(message.time || "")}</span></div>`;
+  const mine = message.from === state.profile.username;
+  const sender = mine ? "You" : (message.name || message.from || "User");
+  return `<div class="chat-bubble ${mine ? "me" : ""}"><strong>${escapeHtml(sender)}</strong><br>${escapeHtml(message.text)}<span>${escapeHtml(message.time || "")}</span></div>`;
 }
 
 function seedMessages(id) {
@@ -673,7 +670,6 @@ function render() {
     communities: communitiesView,
     "create-community": createCommunity,
     "community-detail": communityDetail,
-    "request-sent": requestSent,
     accepted,
     notifications,
     settings,
@@ -793,18 +789,13 @@ document.addEventListener("click", (event) => {
   }
   if (action === "detail") state.modalCommunity = community;
   if (action === "close-modal") state.modalCommunity = null;
-  if (action === "send-request") {
-    state.requests[community] = "pending";
-    if (!state.saved.includes(community)) state.saved.push(community);
-    setRoute("request-sent", { community });
-    return;
-  }
-  if (action === "approve-request") {
+  if (action === "join-community") {
     delete state.requests[community];
     if (!state.joined.includes(community)) state.joined.push(community);
     state.saved = state.saved.filter((id) => id !== community);
-    seedMessages(community);
-    setRoute("accepted", { community });
+    if (!state.messages[community]) state.messages[community] = [];
+    saveState();
+    setRoute("chat", { community });
     return;
   }
   if (action === "cancel-request") {
@@ -876,6 +867,7 @@ document.addEventListener("submit", async (event) => {
       apiToken = result.token;
       localStorage.setItem(tokenKey, apiToken);
       applyServerState(result.state);
+      await loadCommunities();
       setRoute("dashboard");
     } catch (error) {
       showError(form, error.message || "Username atau password belum cocok.");
@@ -902,6 +894,7 @@ document.addEventListener("submit", async (event) => {
       apiToken = result.token;
       localStorage.setItem(tokenKey, apiToken);
       applyServerState(result.state);
+      await loadCommunities();
       setRoute("dashboard");
     } catch (error) {
       showError(form, error.message || "Akun belum bisa dibuat.");
@@ -941,10 +934,17 @@ document.addEventListener("submit", async (event) => {
       reasons: data.get("reasons").split("\n").map((reason) => reason.trim()).filter(Boolean),
       description
     };
-    state.communities.push(community);
-    communities = state.communities;
-    saveState();
-    setRoute("community-detail", { community: id });
+    try {
+      const result = await apiRequest("/api/communities", {
+        method: "POST",
+        body: JSON.stringify({ community })
+      });
+      syncCommunities(result.communities);
+      saveState();
+      setRoute("community-detail", { community: result.community.id });
+    } catch (error) {
+      showError(form, error.message || "Komunitas belum bisa dibuat.");
+    }
     return;
   }
 
@@ -953,34 +953,43 @@ document.addEventListener("submit", async (event) => {
     const text = input.value.trim();
     const community = form.dataset.community;
     if (text) {
-      if (!state.messages[community]) seedMessages(community);
-      state.messages[community].push({ from: "me", text, time: currentTime() });
-      if (state.settings.autoReply) {
-        state.messages[community].push({
-          from: "them",
-          text: "Noted. Aku kabari detailnya di grup ya.",
-          time: currentTime()
+      try {
+        const result = await apiRequest("/api/messages", {
+          method: "POST",
+          body: JSON.stringify({ communityId: community, text })
         });
+        state.messages[community] = result.messages;
+        input.value = "";
+        saveState();
+        render();
+      } catch (error) {
+        console.warn("Message send failed", error);
       }
-      input.value = "";
-      saveState();
-      render();
     }
   }
 });
 
 window.addEventListener("hashchange", render);
 
+setInterval(() => {
+  if (apiToken && state.route === "chat" && state.routeParams.community) {
+    loadMessages(state.routeParams.community);
+  }
+}, 5000);
+
 async function startApp() {
   if (apiToken) {
     try {
       const result = await apiRequest("/api/state");
       applyServerState(result.state);
+      syncCommunities(result.communities);
     } catch (error) {
       apiToken = "";
       localStorage.removeItem(tokenKey);
       state.isLoggedIn = false;
     }
+  } else {
+    await loadCommunities();
   }
   render();
 }

@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: rantau
+    env: node
+    plan: free
+    buildCommand: ""
+    startCommand: npm start
+    disk:
+      name: rantau-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
