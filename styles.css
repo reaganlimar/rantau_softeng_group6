@@ -302,6 +302,10 @@ h3 {
   min-width: 190px;
 }
 
+.nav-btn[data-route="notifications"] {
+  min-width: 170px;
+}
+
 .nav-btn[data-route="settings"] {
   min-width: 150px;
 }
@@ -358,10 +362,6 @@ h3 {
 .stat-card strong {
   display: block;
   font-size: 19px;
-}
-
-.blank-value {
-  min-height: 1.15em;
 }
 
 .main {
@@ -564,6 +564,11 @@ h3 {
   background: var(--lavender);
 }
 
+.community-art.lavender,
+.detail-image.lavender {
+  background: var(--lavender);
+}
+
 .community-art.purple {
   background: var(--purple);
 }
@@ -749,6 +754,10 @@ h3 {
   display: grid;
   gap: 18px;
   margin: 30px 0;
+  max-height: 430px;
+  overflow-y: auto;
+  padding-right: 8px;
+  scroll-behavior: smooth;
 }
 
 .chat-bubble {
@@ -773,6 +782,13 @@ h3 {
   display: grid;
   grid-template-columns: 1fr 82px;
   gap: 16px;
+}
+
+.chat-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
 }
 
 .profile-form {

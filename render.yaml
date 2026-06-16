@@ -3,7 +3,7 @@ services:
     name: rantau
     env: node
     plan: free
-    buildCommand: ""
+    buildCommand: npm install
     startCommand: npm start
     disk:
       name: rantau-data

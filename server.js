@@ -1,7 +1,7 @@
 const http = require("node:http");
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const { randomUUID } = require("node:crypto");
+const { randomUUID, randomBytes, pbkdf2Sync, timingSafeEqual } = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 
 const port = Number(process.env.PORT || 4173);
@@ -66,6 +66,67 @@ function userFromRow(row) {
   };
 }
 
+function hashPassword(password) {
+  const salt = randomBytes(16).toString("hex");
+  const hash = pbkdf2Sync(password, salt, 120000, 32, "sha256").toString("hex");
+  return `pbkdf2:${salt}:${hash}`;
+}
+
+function verifyPassword(password, storedPassword) {
+  if (!storedPassword) return false;
+  if (!storedPassword.startsWith("pbkdf2:")) return password === storedPassword;
+  const [, salt, storedHash] = storedPassword.split(":");
+  const hash = pbkdf2Sync(password, salt, 120000, 32, "sha256");
+  return timingSafeEqual(Buffer.from(storedHash, "hex"), hash);
+}
+
+function cleanStateForStorage(state) {
+  const nextState = structuredClone(state);
+  nextState.isLoggedIn = true;
+  nextState.profile = {
+    ...(nextState.profile || {}),
+    password: ""
+  };
+  return nextState;
+}
+
+function communityArt(category = "") {
+  const value = category.toLowerCase();
+  if (value.includes("kuliner") || value.includes("food")) return "orange";
+  if (value.includes("karier") || value.includes("career")) return "purple";
+  if (value.includes("bahasa") || value.includes("language")) return "mint";
+  return "lavender";
+}
+
+function memberCount(communityId) {
+  return database.prepare("SELECT state_json FROM users").all().reduce((total, row) => {
+    try {
+      const parsed = JSON.parse(row.state_json);
+      return total + (parsed.joined?.includes(communityId) ? 1 : 0);
+    } catch {
+      return total;
+    }
+  }, 0);
+}
+
+function membersForCommunity(communityId) {
+  return database.prepare("SELECT username, state_json FROM users").all().map((row) => {
+    try {
+      const parsed = JSON.parse(row.state_json);
+      if (!parsed.joined?.includes(communityId) || parsed.settings?.visible === false) return null;
+      return {
+        username: row.username,
+        name: parsed.profile?.name || row.username,
+        city: parsed.profile?.city || "",
+        origin: parsed.profile?.origin || "",
+        bio: parsed.profile?.bio || ""
+      };
+    } catch {
+      return null;
+    }
+  }).filter(Boolean);
+}
+
 function getUserByUsername(username) {
   return userFromRow(database.prepare("SELECT * FROM users WHERE username = ?").get(username));
 }
@@ -103,7 +164,8 @@ function communityFromRow(row) {
     name: row.name,
     category: row.category,
     city: row.city,
-    art: "",
+    art: communityArt(row.category),
+    members: memberCount(row.id),
     nextEvent: row.next_event || "",
     location: row.location || "",
     reasons: JSON.parse(row.reasons_json || "[]"),
@@ -154,10 +216,26 @@ function messagesForCommunity(communityId) {
 }
 
 function insertMessage(communityId, user, text) {
+  const senderName = user.state.settings?.visible === false ? "Member" : (user.state.profile.name || user.username);
   database.prepare(`
     INSERT INTO messages (id, community_id, username, name, text)
     VALUES (?, ?, ?, ?, ?)
-  `).run(randomUUID(), communityId, user.username, user.state.profile.name || user.username, text);
+  `).run(randomUUID(), communityId, user.username, senderName, text);
+}
+
+function insertSystemReply(communityId, user) {
+  if (user.state.settings?.autoReply === false) return;
+  const community = getCommunity(communityId);
+  database.prepare(`
+    INSERT INTO messages (id, community_id, username, name, text)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    randomUUID(),
+    communityId,
+    "system",
+    "RantaU",
+    `Pesan kamu sudah masuk ke ${community?.name || "komunitas"}. Anggota lain bisa membalas di ruang chat ini.`
+  );
 }
 
 function sendJson(res, status, data) {
@@ -167,7 +245,7 @@ function sendJson(res, status, data) {
 
 function publicState(user) {
   const state = structuredClone(user.state);
-  state.profile.password = "";
+  if (state.profile) state.profile.password = "";
   return state;
 }
 
@@ -192,14 +270,11 @@ async function handleApi(req, res) {
     const token = randomUUID();
     const user = {
       username,
-      password,
+      password: hashPassword(password),
       token,
-      state: {
-        ...state,
-        isLoggedIn: true
-      }
+      state: cleanStateForStorage(state)
     };
-    insertUser(username, password, token, user.state);
+    insertUser(username, user.password, token, user.state);
     return sendJson(res, 201, { token, state: publicState(user) });
   }
 
@@ -208,10 +283,12 @@ async function handleApi(req, res) {
     const username = body.username?.trim();
     const password = body.password?.trim();
     const user = getUserByUsername(username);
-    if (!user || user.password !== password) return sendJson(res, 401, { error: "Invalid username or password." });
+    if (!user || !verifyPassword(password, user.password)) return sendJson(res, 401, { error: "Invalid username or password." });
 
     user.token = randomUUID();
     user.state.isLoggedIn = true;
+    if (user.state.profile) user.state.profile.password = "";
+    if (!user.password.startsWith("pbkdf2:")) user.password = hashPassword(password);
     updateUser(username, user);
     return sendJson(res, 200, { token: user.token, state: publicState(user) });
   }
@@ -233,14 +310,14 @@ async function handleApi(req, res) {
     const nextState = body.state;
     if (!nextState) return sendJson(res, 400, { error: "State is required." });
 
-    user.state = {
-      ...nextState,
-      isLoggedIn: true,
-      profile: {
-        ...nextState.profile,
-        password: user.password
+    user.state = cleanStateForStorage(nextState);
+    if (body.passwordChange?.newPassword) {
+      const currentPassword = body.passwordChange.currentPassword || "";
+      if (!verifyPassword(currentPassword, user.password)) {
+        return sendJson(res, 403, { error: "Current password is incorrect." });
       }
-    };
+      user.password = hashPassword(body.passwordChange.newPassword);
+    }
     if (nextState.profile?.username && nextState.profile.username !== username) {
       const newUsername = nextState.profile.username;
       if (getUserByUsername(newUsername)) return sendJson(res, 409, { error: "Username already exists." });
@@ -277,6 +354,13 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { messages: messagesForCommunity(communityId) });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/members") {
+    const communityId = url.searchParams.get("community");
+    if (!communityId) return sendJson(res, 400, { error: "Community id is required." });
+    if (!getCommunity(communityId)) return sendJson(res, 404, { error: "Community not found." });
+    return sendJson(res, 200, { members: membersForCommunity(communityId) });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/messages") {
     const token = req.headers.authorization?.replace("Bearer ", "");
     const user = getUserByToken(token);
@@ -288,6 +372,7 @@ async function handleApi(req, res) {
     if (!getCommunity(communityId)) return sendJson(res, 404, { error: "Community not found." });
 
     insertMessage(communityId, user, text.trim());
+    insertSystemReply(communityId, user);
     return sendJson(res, 201, { messages: messagesForCommunity(communityId) });
   }
 

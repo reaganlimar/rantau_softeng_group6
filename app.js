@@ -14,6 +14,7 @@ const initialState = {
   saved: [],
   rsvps: [],
   communities: [],
+  members: {},
   notificationsRead: [],
   settings: {
     notification: true,
@@ -82,6 +83,17 @@ async function loadMessages(communityId) {
     if (previous !== next && state.route === "chat" && state.routeParams.community === communityId) render();
   } catch (error) {
     console.warn("Message load failed", error);
+  }
+}
+
+async function loadMembers(communityId) {
+  try {
+    const result = await apiRequest(`/api/members?community=${encodeURIComponent(communityId)}`);
+    state.members[communityId] = result.members;
+    localStorage.setItem(storageKey, JSON.stringify(state));
+    if (state.route === "accepted" && state.routeParams.community === communityId) render();
+  } catch (error) {
+    console.warn("Member load failed", error);
   }
 }
 
@@ -207,6 +219,7 @@ function shell(content, active = "Home") {
           ${navButton("Home", "dashboard", active)}
           ${navButton("Profile", "profile", active)}
           ${navButton("Communities", "communities", active)}
+          ${navButton("Notifications", "notifications", active)}
           ${navButton("Chat", "chat", active)}
           ${navButton("Settings", "settings", active)}
         </nav>
@@ -231,9 +244,9 @@ function sidebar() {
         <div class="avatar">${initials()}</div>
       </div>
       <button class="btn primary" data-route="profile">Lihat Profile</button>
-      <div class="card stat-card"><strong class="blank-value"></strong><span class="subtle">komunitas tersedia di sekitar kota rantau</span></div>
-      <div class="card stat-card"><strong class="blank-value"></strong><span class="subtle">cocok berdasarkan minat dan tujuan</span></div>
-      <div class="card stat-card"><strong class="blank-value"></strong><span class="subtle">komunitas aktif</span><span class="subtle">request menunggu</span></div>
+      <div class="card stat-card"><strong>${nearbyCommunities().length}</strong><span class="subtle">komunitas di sekitar kota rantau</span></div>
+      <div class="card stat-card"><strong>${bestMatch()}%</strong><span class="subtle">match komunitas terbaik</span></div>
+      <div class="card stat-card"><strong>${state.joined.length} aktif</strong><span class="subtle">${pendingRequests()} request menunggu</span></div>
     </aside>
   `;
 }
@@ -255,10 +268,10 @@ function dashboard() {
       </div>
       <h2>Ringkasan hari ini</h2>
       <div class="metric-grid">
-        <div class="metric"><strong class="blank-value"></strong><span class="subtle">anggota aktif</span></div>
-        <div class="metric"><strong class="blank-value"></strong><span class="subtle">match komunitas</span></div>
-        <div class="metric"><strong class="blank-value"></strong><span class="subtle">event dekat</span></div>
-        <div class="metric mint"><strong class="blank-value"></strong><span>profil valid</span></div>
+        <div class="metric"><strong>${totalMembers()}</strong><span class="subtle">anggota aktif</span></div>
+        <div class="metric"><strong>${bestMatch()}%</strong><span class="subtle">match komunitas</span></div>
+        <div class="metric"><strong>${nearbyEvents.length}</strong><span class="subtle">event tersimpan</span></div>
+        <div class="metric mint"><strong>${profileComplete() ? "OK" : "Lengkapi"}</strong><span>profil valid</span></div>
       </div>
       <div class="panel status-note">
         <h2>Agenda terdekat</h2>
@@ -318,7 +331,9 @@ function communityLine(community, status) {
     <div class="list-line">
       <span class="check">${status === "joined" ? "IN" : "SV"}</span>
       <span>${community.name}</span>
-      <span class="subtle">${status}</span>
+      ${status === "joined"
+        ? `<button class="btn pink" data-action="leave-community" data-community="${community.id}">Keluar</button>`
+        : `<span class="subtle">${status}</span>`}
     </div>
   `;
 }
@@ -336,6 +351,14 @@ function editProfile() {
           <span>Bio</span>
           <textarea name="bio" required>${escapeHtml(state.profile.bio)}</textarea>
         </label>
+        <label class="field">
+          <span>Password sekarang</span>
+          <input name="currentPassword" type="password" placeholder="Isi jika ingin ganti password">
+        </label>
+        <label class="field">
+          <span>Password baru</span>
+          <input name="newPassword" type="password" placeholder="Password baru">
+        </label>
         <div class="form-error full" data-error></div>
         <div class="actions full">
           <button class="btn primary" type="submit">Simpan</button>
@@ -347,11 +370,15 @@ function editProfile() {
 }
 
 function communitiesView() {
+  const city = state.profile.city?.toLowerCase().trim();
   const filtered = communities.filter((community) => {
     const byChip = state.activeFilter === "Semua" || community.category === state.activeFilter;
     const text = `${community.name} ${community.city} ${community.category}`.toLowerCase();
-    return byChip && text.includes(state.query.toLowerCase());
+    const bySearch = text.includes(state.query.toLowerCase());
+    const byCity = !city || community.city.toLowerCase().includes(city) || state.query.trim();
+    return byChip && bySearch && byCity;
   });
+  const chips = ["Semua", ...new Set(communities.map((community) => community.category).filter(Boolean))];
 
   return shell(html`
     <section class="view wide">
@@ -359,7 +386,7 @@ function communitiesView() {
         <h1 style="margin:0; flex:1 1 280px">Cari komunitas</h1>
         <button class="btn primary" data-route="create-community">Buat komunitas baru</button>
         <div class="chip-row">
-          ${["Semua", "Kuliner", "Karier", "Bahasa daerah"].map(chip).join("")}
+          ${chips.map(chip).join("")}
         </div>
       </div>
       <div class="search-row">
@@ -367,11 +394,11 @@ function communitiesView() {
         <button class="btn" data-action="reset-search">Reset</button>
       </div>
       <div class="community-grid">
-        ${filtered.map(communityCard).join("") || `<div class="panel"><h3>Belum ada komunitas</h3></div>`}
+        ${filtered.map(communityCard).join("") || `<div class="panel"><h3>Belum ada komunitas di kota kamu</h3><p class="subtle">Coba buat komunitas baru atau cari nama/kategori komunitas.</p></div>`}
       </div>
       <div class="panel status-note">
         <h3>Filter aktif: ${state.activeFilter === "Semua" ? "Semua komunitas" : state.activeFilter}</h3>
-        <p class="subtle">Gunakan pencarian dan filter setelah data komunitas tersedia.</p>
+        <p class="subtle">Daftar utama diprioritaskan berdasarkan kota rantau kamu. Pencarian bisa dipakai untuk menemukan komunitas di kota lain.</p>
       </div>
     </section>
   `, "Communities");
@@ -422,11 +449,12 @@ function communityCard(community) {
   const status = communityStatus(community.id);
   return html`
     <article class="community-card card">
-      <div class="community-art ${community.art}"></div>
+      <div class="community-art ${community.art || "lavender"}"></div>
       <h3>${community.name}</h3>
-      <p class="subtle">${community.city || "Kota belum diisi"} &bull; ${community.category || "Kategori belum diisi"}</p>
+      <p class="subtle">${community.city || "Kota belum diisi"} &bull; ${community.category || "Kategori belum diisi"} &bull; ${community.members || 0} anggota</p>
       <div class="tag-row">
         <span class="tag">${community.category}</span>
+        <span class="tag">${communityMatch(community)}% cocok</span>
         <span class="tag">${status}</span>
       </div>
       <div class="card-actions">
@@ -454,11 +482,12 @@ function communityDetail() {
       <p class="subtle">${community.city || "Kota belum diisi"} &bull; ${community.category || "Kategori belum diisi"}</p>
       <div class="detail-layout">
         <div>
-          <div class="detail-image ${community.art}"></div>
+          <div class="detail-image ${community.art || "lavender"}"></div>
           <div class="actions" style="margin-top: 28px">
             ${joined
               ? `<button class="btn primary" data-route="chat" data-community="${community.id}">Mulai Chat</button>`
               : `<button class="btn primary" data-action="join-community" data-community="${community.id}">Gabung komunitas</button>`}
+            ${joined ? `<button class="btn pink" data-action="leave-community" data-community="${community.id}">Keluar komunitas</button>` : ""}
             <button class="btn gold" data-action="toggle-save" data-community="${community.id}">${saved ? "Tersimpan" : "Simpan"}</button>
             <button class="btn ${state.rsvps.includes(community.id) ? "mint" : ""}" data-action="toggle-rsvp" data-community="${community.id}">
               ${state.rsvps.includes(community.id) ? "Ikut event" : "Daftar event"}
@@ -483,6 +512,8 @@ function communityDetail() {
 function accepted() {
   const community = communityById(state.routeParams.community);
   if (!community) return shell(emptyPanel("Status belum tersedia", "Data penerimaan akan tampil setelah request komunitas disetujui."), "Communities");
+  if (apiToken && !state.members[community.id]) loadMembers(community.id);
+  const buddies = (state.members[community.id] || []).filter((member) => member.username !== state.profile.username);
   return shell(html`
     <section class="view wide">
       <h1>Kamu diterima</h1>
@@ -498,7 +529,7 @@ function accepted() {
       <h2>Buddy rekomendasi</h2>
       <div class="buddy-grid">
         <div>
-          <p class="subtle">Rekomendasi buddy akan tampil setelah data anggota tersedia.</p>
+          ${buddies.map((member) => buddy(initialsFromName(member.name), escapeHtml(member.name), `${escapeHtml(member.origin || "Kota asal belum diisi")} ke ${escapeHtml(member.city || community.city)}`)).join("") || `<p class="subtle">Belum ada anggota lain yang bisa direkomendasikan.</p>`}
         </div>
         <div class="event-card card">
           <h2>Next event</h2>
@@ -538,10 +569,11 @@ function notifications() {
         </div>
       </div>
     </section>
-  `, "Settings");
+  `, "Notifications");
 }
 
 function notificationsData() {
+  if (!state.settings.notification) return [];
   const dynamic = [];
   state.joined.forEach((id) => {
     const community = communityById(id);
@@ -594,14 +626,16 @@ function settingRow(label, value, key) {
 
 function chat() {
   const community = communityById(state.routeParams.community) || communityById(state.joined[0]);
-  if (!community) return shell(emptyPanel("Chat belum tersedia", "Chat akan aktif setelah user bergabung dengan komunitas."), "Chat");
+  if (!community) return shell(emptyPanel("Chat belum tersedia", "Gabung komunitas dulu supaya kamu bisa masuk ke ruang chat bersama."), "Chat");
   const messages = state.messages[community.id] || [];
   if (apiToken && !state.messages[community.id]) loadMessages(community.id);
+  const joinedCommunities = state.joined.map((id) => communityById(id)).filter(Boolean);
   return shell(html`
     <section class="view wide">
       <div class="chat-panel panel">
         <h1>${community.name}</h1>
         <p class="subtle">Percakapan komunitas</p>
+        ${joinedCommunities.length > 1 ? `<div class="chat-tabs">${joinedCommunities.map((item) => `<button class="chip ${item.id === community.id ? "active" : ""}" data-route="chat" data-community="${item.id}">${escapeHtml(item.name)}</button>`).join("")}</div>` : ""}
         <div class="messages" aria-live="polite">
           ${messages.map((message) => chatBubble(message)).join("") || `<div class="chat-bubble">Belum ada pesan.<span></span></div>`}
         </div>
@@ -676,6 +710,7 @@ function render() {
     chat
   };
   app.innerHTML = (routes[state.route] || dashboard)();
+  if (state.route === "chat") scrollChatToBottom();
 }
 
 function escapeHtml(value) {
@@ -703,11 +738,34 @@ function communityStatus(id) {
 }
 
 function totalMembers() {
-  return communities.reduce((sum, community) => sum + community.members, 0);
+  return communities.reduce((sum, community) => sum + Number(community.members || 0), 0);
 }
 
 function bestMatch() {
-  return communities.length ? Math.max(...communities.map((community) => community.match || 0)) : 0;
+  return communities.length ? Math.max(...communities.map(communityMatch)) : 0;
+}
+
+function communityMatch(community) {
+  let score = 50;
+  const profileCity = state.profile.city?.toLowerCase().trim();
+  const profileOrigin = state.profile.origin?.toLowerCase().trim();
+  const city = community.city?.toLowerCase() || "";
+  const text = `${community.name} ${community.category} ${community.description} ${(community.reasons || []).join(" ")}`.toLowerCase();
+  if (profileCity && city.includes(profileCity)) score += 25;
+  if (profileOrigin && text.includes(profileOrigin)) score += 10;
+  if (state.saved.includes(community.id) || state.joined.includes(community.id)) score += 10;
+  if ((community.reasons || []).length) score += 5;
+  return Math.min(score, 100);
+}
+
+function nearbyCommunities() {
+  const city = state.profile.city?.toLowerCase().trim();
+  if (!city) return communities;
+  return communities.filter((community) => community.city?.toLowerCase().includes(city));
+}
+
+function pendingRequests() {
+  return Object.values(state.requests).filter((request) => request === "pending").length;
 }
 
 function profileComplete() {
@@ -722,8 +780,19 @@ function initials() {
   return escapeHtml(state.profile.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "U");
 }
 
+function initialsFromName(name) {
+  return escapeHtml(String(name || "Member").split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "M");
+}
+
 function currentTime() {
   return new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+}
+
+function scrollChatToBottom() {
+  requestAnimationFrame(() => {
+    const messageList = document.querySelector(".messages");
+    if (messageList) messageList.scrollTop = messageList.scrollHeight;
+  });
 }
 
 function createId(value) {
@@ -796,6 +865,13 @@ document.addEventListener("click", (event) => {
     if (!state.messages[community]) state.messages[community] = [];
     saveState();
     setRoute("chat", { community });
+    return;
+  }
+  if (action === "leave-community") {
+    state.joined = state.joined.filter((id) => id !== community);
+    state.rsvps = state.rsvps.filter((id) => id !== community);
+    saveState();
+    setRoute("communities");
     return;
   }
   if (action === "cancel-request") {
@@ -904,6 +980,12 @@ document.addEventListener("submit", async (event) => {
 
   if (type === "profile") {
     const data = new FormData(form);
+    const currentPassword = data.get("currentPassword").trim();
+    const newPassword = data.get("newPassword").trim();
+    if ((currentPassword && !newPassword) || (!currentPassword && newPassword)) {
+      showError(form, "Isi password sekarang dan password baru kalau ingin mengganti password.");
+      return;
+    }
     state.profile = {
       ...state.profile,
       name: data.get("name").trim(),
@@ -912,7 +994,20 @@ document.addEventListener("submit", async (event) => {
       city: data.get("city").trim(),
       bio: data.get("bio").trim()
     };
-    setRoute("profile");
+    try {
+      const result = await apiRequest("/api/state", {
+        method: "PUT",
+        body: JSON.stringify({
+          state,
+          passwordChange: newPassword ? { currentPassword, newPassword } : null
+        })
+      });
+      applyServerState(result.state);
+      syncCommunities(result.communities);
+      setRoute("profile");
+    } catch (error) {
+      showError(form, error.message || "Profil belum bisa disimpan.");
+    }
     return;
   }
 
@@ -928,7 +1023,6 @@ document.addEventListener("submit", async (event) => {
       name,
       category,
       city,
-      art: "",
       nextEvent: data.get("nextEvent").trim(),
       location: data.get("location").trim(),
       reasons: data.get("reasons").split("\n").map((reason) => reason.trim()).filter(Boolean),
