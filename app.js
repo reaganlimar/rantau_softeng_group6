@@ -11,7 +11,6 @@ const initialState = {
   modalCommunity: null,
   routeParams: {},
   requests: {},
-  incomingRequests: [],
   joined: [],
   saved: [],
   rsvps: [],
@@ -36,6 +35,17 @@ const initialState = {
 
 const activityCategories = ["Semua", "Kuliner", "Olahraga", "Belajar", "Karier", "Bahasa daerah", "Hobi", "Event santai"];
 
+function sanitizeState(rawState) {
+  const next = rawState;
+  if (!activityCategories.includes(next.activeFilter)) {
+    next.activeFilter = "Semua";
+  }
+  if (!["my", "find"].includes(next.communityTab)) {
+    next.communityTab = "my";
+  }
+  return next;
+}
+
 let state = loadState();
 let communities = state.communities;
 let apiToken = localStorage.getItem(tokenKey) || "";
@@ -54,11 +64,9 @@ async function apiRequest(path, options = {}) {
   return data;
 }
 
-function applyServerState(nextState, requests, incomingRequests) {
-  state = mergeDeep(structuredClone(initialState), nextState);
+function applyServerState(nextState) {
+  state = sanitizeState(mergeDeep(structuredClone(initialState), nextState));
   state.isLoggedIn = true;
-  if (requests) state.requests = requests;
-  if (incomingRequests) state.incomingRequests = incomingRequests;
   communities = state.communities || [];
   localStorage.setItem(storageKey, JSON.stringify(state));
 }
@@ -105,7 +113,7 @@ async function loadMembers(communityId) {
 function loadState() {
   try {
     const stored = JSON.parse(localStorage.getItem(storageKey));
-    if (stored) return mergeDeep(structuredClone(initialState), stored);
+    if (stored) return sanitizeState(mergeDeep(structuredClone(initialState), stored));
   } catch (error) {
     console.warn("Failed to load saved RantaU data", error);
   }
@@ -119,10 +127,6 @@ function saveState() {
     apiRequest("/api/state", {
       method: "PUT",
       body: JSON.stringify({ state })
-    }).then((result) => {
-      state.requests = result.requests || {};
-      state.incomingRequests = result.incomingRequests || [];
-      localStorage.setItem(storageKey, JSON.stringify(state));
     }).catch((error) => console.warn("Backend save failed", error));
   }
 }
@@ -228,7 +232,7 @@ function shell(content, active = "Home") {
           ${navButton("Home", "dashboard", active)}
           ${navButton("Profile", "profile", active)}
           ${navButton("Communities", "communities", active)}
-          ${navButton("Notifications", "notifications", active)}
+          ${navButton(notificationLabel(), "notifications", active)}
           ${navButton("Chat", "chat", active)}
           ${navButton("Settings", "settings", active)}
         </nav>
@@ -241,7 +245,13 @@ function shell(content, active = "Home") {
 }
 
 function navButton(label, route, active) {
-  return `<button class="nav-btn ${active === label ? "active" : ""}" data-route="${route}">${label}</button>`;
+  const isActive = active === label || (route === "notifications" && active === "Notifications");
+  return `<button class="nav-btn ${isActive ? "active" : ""}" data-route="${route}">${label}</button>`;
+}
+
+function notificationLabel() {
+  const count = notificationsData().length;
+  return count ? `Notifications (${count})` : "Notifications";
 }
 
 function sidebar() {
@@ -255,10 +265,7 @@ function sidebar() {
       <button class="btn primary" data-route="profile">Lihat Profile</button>
       <div class="card stat-card"><strong>${nearbyCommunities().length}</strong><span class="subtle">komunitas di sekitar kota rantau</span></div>
       <div class="card stat-card"><strong>${bestMatch()}%</strong><span class="subtle">match komunitas terbaik</span></div>
-      <div class="card stat-card"><strong>${state.joined.length} aktif</strong><span class="subtle">${pendingRequests()} request menunggu</span></div>
-      ${state.incomingRequests.length
-        ? `<button class="btn gold" data-route="manage-requests"><strong>${state.incomingRequests.length}</strong> request masuk</button>`
-        : ""}
+      <div class="card stat-card"><strong>${state.joined.length} aktif</strong><span class="subtle">${pendingRequests()} request kamu menunggu approval</span></div>
     </aside>
   `;
 }
@@ -307,10 +314,6 @@ function agendaItem(community) {
 function profile() {
   const activeRows = state.joined.map((id) => communityById(id)).filter(Boolean);
   const savedRows = state.saved.map((id) => communityById(id)).filter(Boolean);
-  const pendingRows = Object.keys(state.requests)
-    .filter((id) => state.requests[id] === "pending")
-    .map((id) => communityById(id))
-    .filter(Boolean);
   return shell(html`
     <section class="view wide">
       <div class="panel profile-hero">
@@ -330,7 +333,6 @@ function profile() {
         <div class="panel">
           <h2>Komunitas aktif</h2>
           ${activeRows.map((community) => communityLine(community, "joined")).join("") || `<p class="subtle">Belum join komunitas.</p>`}
-          ${pendingRows.map((community) => communityLine(community, "pending")).join("")}
           ${savedRows.map((community) => communityLine(community, "saved")).join("")}
         </div>
         <div class="panel">
@@ -344,16 +346,13 @@ function profile() {
 }
 
 function communityLine(community, status) {
-  const labels = { joined: "IN", pending: "..", saved: "SV" };
   return html`
     <div class="list-line">
-      <span class="check">${labels[status] || "SV"}</span>
+      <span class="check">${status === "joined" ? "IN" : "SV"}</span>
       <span>${community.name}</span>
       ${status === "joined"
         ? `<button class="btn pink" data-action="leave-community" data-community="${community.id}">Keluar</button>`
-        : status === "pending"
-          ? `<button class="btn" data-action="cancel-request" data-community="${community.id}">Batalkan</button>`
-          : `<span class="subtle">${status}</span>`}
+        : `<span class="subtle">${status}</span>`}
     </div>
   `;
 }
@@ -396,8 +395,8 @@ function communitiesView() {
   const filtered = browse.filter((community) => {
     const byCategory = state.activeFilter === "Semua" || community.category === state.activeFilter;
     const text = `${community.name} ${community.city} ${community.category}`.toLowerCase();
-    const bySearch = !state.query.trim() || text.includes(state.query.toLowerCase());
-    const byCity = !city || !!state.query.trim() || community.city.toLowerCase().includes(city);
+    const bySearch = text.includes(state.query.toLowerCase());
+    const byCity = !city || community.city.toLowerCase().includes(city) || state.query.trim();
     return byCategory && bySearch && byCity;
   });
 
@@ -426,7 +425,6 @@ function communitiesView() {
           <input class="search-input" data-search value="${escapeAttr(state.query)}" placeholder="Cari komunitas..." aria-label="Cari komunitas">
           <button class="btn" data-action="reset-search">Reset</button>
         </div>
-        ${state.query.trim() && city ? `<p class="subtle" style="margin: -8px 0 18px">Pencarian aktif mencari di semua kota, bukan cuma ${escapeHtml(state.profile.city)}.</p>` : ""}
         <div class="community-grid">
           ${filtered.map(communityCard).join("") || `<div class="panel"><h3>Belum ada komunitas di kota kamu</h3><p class="subtle">Coba buat komunitas baru atau cari nama/kategori komunitas.</p></div>`}
         </div>
@@ -492,7 +490,7 @@ function communityCard(community) {
         <span class="tag">${owner ? "owner" : status}</span>
       </div>
       <div class="card-actions">
-        <button class="btn" data-action="detail" data-community="${community.id}">Preview</button>
+        <button class="btn primary" data-route="community-detail" data-community="${community.id}">Lihat</button>
         ${communityActionButton(community)}
       </div>
     </article>
@@ -502,8 +500,8 @@ function communityCard(community) {
 function communityActionButton(community) {
   if (isOwner(community)) return `<button class="btn gold" data-route="chat" data-community="${community.id}">Kelola</button>`;
   if (state.joined.includes(community.id)) return `<button class="btn gold" data-route="chat" data-community="${community.id}">Chat</button>`;
-  if (state.requests[community.id] === "pending") return `<button class="btn" data-action="cancel-request" data-community="${community.id}">Batalkan request</button>`;
-  return `<button class="btn primary" data-action="join-community" data-community="${community.id}">Request join</button>`;
+  if (state.saved.includes(community.id)) return `<button class="btn" data-action="toggle-save" data-community="${community.id}">Unsave</button>`;
+  return `<button class="btn primary" data-action="join-community" data-community="${community.id}">Gabung</button>`;
 }
 
 function communityDetail() {
@@ -512,7 +510,6 @@ function communityDetail() {
   const saved = state.saved.includes(community.id);
   const owner = isOwner(community);
   const joined = owner || state.joined.includes(community.id);
-  const pending = state.requests[community.id] === "pending";
   return shell(html`
     <section class="view wide">
       <h1>${community.name}</h1>
@@ -523,9 +520,7 @@ function communityDetail() {
           <div class="actions" style="margin-top: 28px">
             ${joined
               ? `<button class="btn primary" data-route="chat" data-community="${community.id}">${owner ? "Kelola Chat" : "Mulai Chat"}</button>`
-              : pending
-                ? `<button class="btn" data-action="cancel-request" data-community="${community.id}">Batalkan request</button>`
-                : `<button class="btn primary" data-action="join-community" data-community="${community.id}">Request join</button>`}
+              : `<button class="btn primary" data-action="join-community" data-community="${community.id}">Gabung komunitas</button>`}
             ${joined && !owner ? `<button class="btn pink" data-action="leave-community" data-community="${community.id}">Keluar komunitas</button>` : ""}
             <button class="btn gold" data-action="toggle-save" data-community="${community.id}">${saved ? "Tersimpan" : "Simpan"}</button>
             <button class="btn ${state.rsvps.includes(community.id) ? "mint" : ""}" data-action="toggle-rsvp" data-community="${community.id}">
@@ -581,43 +576,6 @@ function accepted() {
   `, "Communities");
 }
 
-function manageRequests() {
-  const grouped = state.incomingRequests.reduce((map, request) => {
-    if (!map[request.community]) map[request.community] = [];
-    map[request.community].push(request);
-    return map;
-  }, {});
-  const communityIds = Object.keys(grouped);
-  return shell(html`
-    <section class="view wide">
-      <h1>Kelola request</h1>
-      <p class="subtle">Terima atau tolak orang yang ingin join komunitas kamu.</p>
-      ${communityIds.length
-        ? communityIds.map((id) => requestGroup(communityById(id), grouped[id])).join("")
-        : `<div class="panel"><h3>Tidak ada request</h3><p class="subtle">Semua request sudah ditindaklanjuti.</p></div>`}
-    </section>
-  `, "Notifications");
-}
-
-function requestGroup(community, requests) {
-  if (!community) return "";
-  return html`
-    <div class="panel">
-      <h2>${community.name}</h2>
-      ${requests.map((request) => html`
-        <div class="list-line">
-          <span class="check">${initialsFromName(request.name)}</span>
-          <span>${escapeHtml(request.name)}</span>
-          <span class="actions">
-            <button class="btn primary" data-action="accept-request" data-community="${community.id}" data-username="${escapeAttr(request.username)}">Terima</button>
-            <button class="btn pink" data-action="decline-request" data-community="${community.id}" data-username="${escapeAttr(request.username)}">Tolak</button>
-          </span>
-        </div>
-      `).join("")}
-    </div>
-  `;
-}
-
 function buddy(initialsText, name, detail, tone = "") {
   return html`
     <div class="buddy-card card">
@@ -639,7 +597,7 @@ function notifications() {
             : `<div class="notification"><div class="notif-icon"></div><div><h3>Belum ada notifikasi</h3><p class="subtle">Semua sudah dibaca.</p></div></div>`}
         </div>
         <div class="empty-panel card">
-          <h2>${items.length ? `${items.length} pesan baru` : "Empty state"}</h2>
+          <h2>${items.length ? `${items.length} notifikasi baru` : "Empty state"}</h2>
           <p class="subtle">${items.length ? "Tindak lanjuti request, chat, dan event dari sini." : "Kalau belum ada notifikasi, area ini menampilkan pesan kosong."}</p>
           <button class="btn gold" data-action="mark-read" style="margin-top: 48px">Mark all read</button>
         </div>
@@ -651,24 +609,30 @@ function notifications() {
 function notificationsData() {
   if (!state.settings.notification) return [];
   const dynamic = [];
-  state.joined.forEach((id) => {
-    const community = communityById(id);
-    if (community) dynamic.push({ id: `accepted-${id}`, title: "Kamu diterima", copy: `Kamu sudah masuk ke ${community.name}.`, tone: "gold", route: "accepted", community: id });
+  myCommunities().forEach((community) => {
+    const title = isOwner(community) ? "Komunitas dibuat" : "Kamu sudah bergabung";
+    const copy = isOwner(community) ? `${community.name} siap menerima anggota.` : `Kamu sudah masuk ke ${community.name}.`;
+    dynamic.push({ id: `community-${community.id}`, title, copy, tone: "gold", route: "community-detail", community: community.id });
   });
-  if (state.incomingRequests.length) {
-    dynamic.push({
-      id: "incoming-requests",
-      title: "Request menunggu",
-      copy: `${state.incomingRequests.length} orang ingin join komunitas kamu.`,
-      tone: "pink",
-      route: "manage-requests",
-      community: ""
-    });
-  }
-  if (Object.values(state.messages).some((messages) => messages.length > 4)) {
-    dynamic.push({ id: "chat-new", title: "Chat aktif", copy: "Percakapan terakhir kamu tersimpan.", tone: "lavender", route: "chat", community: state.joined[0] || "" });
-  }
+  state.saved.forEach((id) => {
+    const community = communityById(id);
+    if (community) dynamic.push({ id: `saved-${id}`, title: "Komunitas disimpan", copy: `${community.name} masuk daftar simpan kamu.`, tone: "mint", route: "community-detail", community: id });
+  });
+  state.rsvps.forEach((id) => {
+    const community = communityById(id);
+    if (community) dynamic.push({ id: `rsvp-${id}`, title: "Event terdaftar", copy: `Kamu terdaftar untuk event ${community.name}.`, tone: "lavender", route: "community-detail", community: id });
+  });
+  Object.entries(state.messages).forEach(([id, messages]) => {
+    const community = communityById(id);
+    if (community && messages.length) {
+      dynamic.push({ id: `chat-${id}-${messages.length}`, title: "Chat komunitas aktif", copy: `${community.name} punya percakapan terbaru.`, tone: "lavender", route: "chat", community: id });
+    }
+  });
   return dynamic.filter((item) => !state.notificationsRead.includes(item.id));
+}
+
+function markNotificationNew(prefix, communityId) {
+  state.notificationsRead = state.notificationsRead.filter((id) => !id.startsWith(`${prefix}-${communityId}`));
 }
 
 function notificationItem(item) {
@@ -751,20 +715,22 @@ function chatBubble(message) {
   return `<div class="chat-bubble ${mine ? "me" : ""}"><strong>${escapeHtml(sender)}</strong><br>${escapeHtml(message.text)}<span>${escapeHtml(message.time || "")}</span></div>`;
 }
 
+function seedMessages(id) {
+  state.messages[id] = [];
+  saveState();
+  return state.messages[id];
+}
+
 function modal() {
   const community = communityById(state.modalCommunity);
   if (!community) return "";
-  const owner = isOwner(community);
-  const reasons = (community.reasons || []).slice(0, 2);
   return html`
     <div class="modal-backdrop" data-action="close-modal">
       <div class="modal" role="dialog" aria-modal="true" aria-label="${community.name}" data-modal>
         <h2>${community.name}</h2>
-        <p class="subtle">${community.city || "Kota belum diisi"} &bull; ${community.category || "Kategori belum diisi"} &bull; ${communityMatch(community)}% cocok</p>
+        <p class="subtle">${community.city || "Kota belum diisi"}</p>
         <p>${community.description || "Deskripsi belum tersedia."}</p>
-        ${reasons.length ? `<div class="tag-row">${reasons.map((reason) => `<span class="tag">${escapeHtml(reason)}</span>`).join("")}</div>` : ""}
         <div class="actions">
-          ${owner || state.joined.includes(community.id) ? "" : communityActionButton(community)}
           <button class="btn primary" data-route="community-detail" data-community="${community.id}">Buka detail</button>
           <button class="btn" data-action="close-modal">Tutup</button>
         </div>
@@ -801,7 +767,6 @@ function render() {
     "community-detail": communityDetail,
     accepted,
     notifications,
-    "manage-requests": manageRequests,
     settings,
     chat
   };
@@ -911,28 +876,14 @@ function showError(form, message) {
   if (target) target.textContent = message;
 }
 
-function showToast(message) {
-  let toast = document.querySelector(".toast");
-  if (!toast) {
-    toast = document.createElement("div");
-    toast.className = "toast";
-    document.body.appendChild(toast);
-  }
-  toast.textContent = message;
-  toast.classList.add("visible");
-  clearTimeout(showToast.timer);
-  showToast.timer = setTimeout(() => toast.classList.remove("visible"), 3200);
-}
-
 function routeParamsFromTarget(target) {
   return target.dataset.community ? { community: target.dataset.community } : {};
 }
 
-document.addEventListener("click", async (event) => {
+document.addEventListener("click", (event) => {
   const modalBox = event.target.closest("[data-modal]");
   const routeTarget = event.target.closest("[data-route]");
   const actionTarget = event.target.closest("[data-action]");
-  const filterTarget = event.target.closest("[data-filter]");
   const communityTabTarget = event.target.closest("[data-community-tab]");
   const toggleTarget = event.target.closest("[data-toggle]");
 
@@ -940,13 +891,6 @@ document.addEventListener("click", async (event) => {
 
   if (routeTarget) {
     setRoute(routeTarget.dataset.route, routeParamsFromTarget(routeTarget));
-    return;
-  }
-
-  if (filterTarget) {
-    state.activeFilter = filterTarget.dataset.filter;
-    saveState();
-    render();
     return;
   }
 
@@ -976,76 +920,39 @@ document.addEventListener("click", async (event) => {
   if (action === "detail") state.modalCommunity = community;
   if (action === "close-modal") state.modalCommunity = null;
   if (action === "join-community") {
-    const target = communityById(community);
-    if (target && isOwner(target)) {
-      if (!state.joined.includes(community)) state.joined.push(community);
-      saveState();
-      setRoute("chat", { community });
-      return;
-    }
-    try {
-      const result = await apiRequest("/api/requests", {
-        method: "POST",
-        body: JSON.stringify({ communityId: community })
-      });
-      state.requests = result.requests || state.requests;
-      state.modalCommunity = null;
-      saveState();
-      render();
-    } catch (error) {
-      showToast(error.message || "Request belum bisa dikirim.");
-    }
+    delete state.requests[community];
+    if (!state.joined.includes(community)) state.joined.push(community);
+    markNotificationNew("community", community);
+    state.communityTab = "my";
+    state.saved = state.saved.filter((id) => id !== community);
+    if (!state.messages[community]) state.messages[community] = [];
+    saveState();
+    setRoute("chat", { community });
     return;
   }
   if (action === "leave-community") {
     state.joined = state.joined.filter((id) => id !== community);
     state.rsvps = state.rsvps.filter((id) => id !== community);
-    delete state.requests[community];
-    try {
-      await apiRequest("/api/requests", { method: "DELETE", body: JSON.stringify({ communityId: community }) });
-    } catch (error) {
-      console.warn("Leave cleanup failed", error);
-    }
     saveState();
     setRoute("communities");
     return;
   }
   if (action === "cancel-request") {
     delete state.requests[community];
-    try {
-      const result = await apiRequest("/api/requests", { method: "DELETE", body: JSON.stringify({ communityId: community }) });
-      state.requests = result.requests || state.requests;
-    } catch (error) {
-      showToast(error.message || "Request belum bisa dibatalkan.");
-    }
-    saveState();
     setRoute("communities");
-    return;
-  }
-  if (action === "accept-request" || action === "decline-request") {
-    const username = actionTarget.dataset.username;
-    try {
-      const result = await apiRequest("/api/requests/respond", {
-        method: "POST",
-        body: JSON.stringify({ communityId: community, username, accept: action === "accept-request" })
-      });
-      state.incomingRequests = result.incomingRequests || [];
-      syncCommunities(result.communities);
-    } catch (error) {
-      showToast(error.message || "Aksi belum bisa diproses.");
-    }
-    render();
     return;
   }
   if (action === "toggle-save") {
     state.saved = state.saved.includes(community)
       ? state.saved.filter((id) => id !== community)
       : [...state.saved, community];
+    markNotificationNew("saved", community);
   }
   if (action === "toggle-rsvp") {
     state.rsvps = state.rsvps.includes(community)
       ? state.rsvps.filter((id) => id !== community)
       : [...state.rsvps, community];
+    markNotificationNew("rsvp", community);
   }
   if (action === "mark-read") state.notificationsRead = notificationsData().map((item) => item.id);
   if (action === "logout") {
@@ -1108,7 +1015,7 @@ document.addEventListener("submit", async (event) => {
       });
       apiToken = result.token;
       localStorage.setItem(tokenKey, apiToken);
-      applyServerState(result.state, result.requests, result.incomingRequests);
+      applyServerState(result.state);
       await loadCommunities();
       setRoute("dashboard");
     } catch (error) {
@@ -1135,7 +1042,7 @@ document.addEventListener("submit", async (event) => {
       });
       apiToken = result.token;
       localStorage.setItem(tokenKey, apiToken);
-      applyServerState(result.state, result.requests, result.incomingRequests);
+      applyServerState(result.state);
       await loadCommunities();
       setRoute("dashboard");
     } catch (error) {
@@ -1168,7 +1075,7 @@ document.addEventListener("submit", async (event) => {
           passwordChange: newPassword ? { currentPassword, newPassword } : null
         })
       });
-      applyServerState(result.state, result.requests, result.incomingRequests);
+      applyServerState(result.state);
       syncCommunities(result.communities);
       setRoute("profile");
     } catch (error) {
@@ -1201,6 +1108,7 @@ document.addEventListener("submit", async (event) => {
       });
       syncCommunities(result.communities);
       if (!state.joined.includes(result.community.id)) state.joined.push(result.community.id);
+      markNotificationNew("community", result.community.id);
       state.communityTab = "my";
       saveState();
       setRoute("chat", { community: result.community.id });
@@ -1221,11 +1129,12 @@ document.addEventListener("submit", async (event) => {
           body: JSON.stringify({ communityId: community, text })
         });
         state.messages[community] = result.messages;
+        markNotificationNew("chat", community);
         input.value = "";
         saveState();
         render();
       } catch (error) {
-        showToast(error.message || "Pesan belum bisa dikirim.");
+        console.warn("Message send failed", error);
       }
     }
   }
@@ -1234,35 +1143,16 @@ document.addEventListener("submit", async (event) => {
 window.addEventListener("hashchange", render);
 
 setInterval(() => {
-  if (!apiToken) return;
-  if (state.route === "chat" && state.routeParams.community) {
+  if (apiToken && state.route === "chat" && state.routeParams.community) {
     loadMessages(state.routeParams.community);
   }
-  refreshRequests();
 }, 5000);
-
-async function refreshRequests() {
-  try {
-    const result = await apiRequest("/api/state");
-    const previousIncoming = JSON.stringify(state.incomingRequests || []);
-    const previousJoined = JSON.stringify([...(state.joined || [])].sort());
-    state.requests = result.requests || {};
-    state.incomingRequests = result.incomingRequests || [];
-    state.joined = [...new Set([...(state.joined || []), ...(result.state.joined || [])])];
-    syncCommunities(result.communities);
-    const changed = previousIncoming !== JSON.stringify(state.incomingRequests) ||
-      previousJoined !== JSON.stringify([...state.joined].sort());
-    if (changed) render();
-  } catch (error) {
-    console.warn("Request refresh failed", error);
-  }
-}
 
 async function startApp() {
   if (apiToken) {
     try {
       const result = await apiRequest("/api/state");
-      applyServerState(result.state, result.requests, result.incomingRequests);
+      applyServerState(result.state);
       syncCommunities(result.communities);
     } catch (error) {
       apiToken = "";

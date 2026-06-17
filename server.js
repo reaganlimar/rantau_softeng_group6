@@ -53,16 +53,6 @@ async function ensureDb() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (community_id) REFERENCES communities(id)
     );
-
-    CREATE TABLE IF NOT EXISTS join_requests (
-      community_id TEXT NOT NULL,
-      username TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (community_id, username),
-      FOREIGN KEY (community_id) REFERENCES communities(id)
-    );
   `);
 }
 
@@ -169,6 +159,14 @@ function renameUser(oldUsername, newUsername) {
     SET username = ?, updated_at = CURRENT_TIMESTAMP
     WHERE username = ?
   `).run(newUsername, oldUsername);
+  database.prepare("UPDATE communities SET created_by = ? WHERE created_by = ?").run(newUsername, oldUsername);
+  database.prepare("UPDATE messages SET username = ? WHERE username = ?").run(newUsername, oldUsername);
+  const hasJoinRequests = database.prepare(`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'join_requests'
+  `).get();
+  if (hasJoinRequests) {
+    database.prepare("UPDATE join_requests SET username = ? WHERE username = ?").run(newUsername, oldUsername);
+  }
 }
 
 function communityFromRow(row) {
@@ -236,51 +234,6 @@ function insertMessage(communityId, user, text) {
   `).run(randomUUID(), communityId, user.username, senderName, text);
 }
 
-function requestsForCommunity(communityId, status) {
-  const rows = status
-    ? database.prepare("SELECT * FROM join_requests WHERE community_id = ? AND status = ? ORDER BY created_at ASC").all(communityId, status)
-    : database.prepare("SELECT * FROM join_requests WHERE community_id = ? ORDER BY created_at ASC").all(communityId);
-  return rows.map((row) => {
-    const requester = getUserByUsername(row.username);
-    return {
-      community: row.community_id,
-      username: row.username,
-      name: requester?.state?.profile?.name || row.username,
-      status: row.status,
-      createdAt: row.created_at
-    };
-  });
-}
-
-function requestsForUser(username) {
-  return database.prepare("SELECT * FROM join_requests WHERE username = ?").all(username).reduce((map, row) => {
-    map[row.community_id] = row.status;
-    return map;
-  }, {});
-}
-
-function incomingRequestsFor(username) {
-  const owned = database.prepare("SELECT id FROM communities WHERE created_by = ?").all(username);
-  return owned.flatMap((community) => requestsForCommunity(community.id, "pending"));
-}
-
-function getRequest(communityId, username) {
-  return database.prepare("SELECT * FROM join_requests WHERE community_id = ? AND username = ?").get(communityId, username);
-}
-
-function upsertRequest(communityId, username, status) {
-  database.prepare(`
-    INSERT INTO join_requests (community_id, username, status)
-    VALUES (?, ?, ?)
-    ON CONFLICT (community_id, username)
-    DO UPDATE SET status = excluded.status, updated_at = CURRENT_TIMESTAMP
-  `).run(communityId, username, status);
-}
-
-function deleteRequest(communityId, username) {
-  database.prepare("DELETE FROM join_requests WHERE community_id = ? AND username = ?").run(communityId, username);
-}
-
 function sendJson(res, status, data) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(data));
@@ -318,12 +271,7 @@ async function handleApi(req, res) {
       state: cleanStateForStorage(state)
     };
     insertUser(username, user.password, token, user.state);
-    return sendJson(res, 201, {
-      token,
-      state: publicState(user),
-      requests: requestsForUser(username),
-      incomingRequests: incomingRequestsFor(username)
-    });
+    return sendJson(res, 201, { token, state: publicState(user) });
   }
 
   if (req.method === "POST" && url.pathname === "/api/login") {
@@ -338,24 +286,14 @@ async function handleApi(req, res) {
     if (user.state.profile) user.state.profile.password = "";
     if (!user.password.startsWith("pbkdf2:")) user.password = hashPassword(password);
     updateUser(username, user);
-    return sendJson(res, 200, {
-      token: user.token,
-      state: publicState(user),
-      requests: requestsForUser(user.username),
-      incomingRequests: incomingRequestsFor(user.username)
-    });
+    return sendJson(res, 200, { token: user.token, state: publicState(user) });
   }
 
   if (req.method === "GET" && url.pathname === "/api/state") {
     const token = req.headers.authorization?.replace("Bearer ", "");
     const user = getUserByToken(token);
     if (!user) return sendJson(res, 401, { error: "Not logged in." });
-    return sendJson(res, 200, {
-      state: publicState(user),
-      communities: allCommunities(),
-      requests: requestsForUser(user.username),
-      incomingRequests: incomingRequestsFor(user.username)
-    });
+    return sendJson(res, 200, { state: publicState(user), communities: allCommunities() });
   }
 
   if (req.method === "PUT" && url.pathname === "/api/state") {
@@ -383,12 +321,7 @@ async function handleApi(req, res) {
       user.username = newUsername;
     }
     updateUser(user.username, user);
-    return sendJson(res, 200, {
-      state: publicState(user),
-      communities: allCommunities(),
-      requests: requestsForUser(user.username),
-      incomingRequests: incomingRequestsFor(user.username)
-    });
+    return sendJson(res, 200, { state: publicState(user), communities: allCommunities() });
   }
 
   if (req.method === "GET" && url.pathname === "/api/communities") {
@@ -409,73 +342,6 @@ async function handleApi(req, res) {
 
     insertCommunity(community, user.username);
     return sendJson(res, 201, { community: getCommunity(community.id), communities: allCommunities() });
-  }
-
-  if (req.method === "POST" && url.pathname === "/api/requests") {
-    const token = req.headers.authorization?.replace("Bearer ", "");
-    const user = getUserByToken(token);
-    if (!user) return sendJson(res, 401, { error: "Not logged in." });
-
-    const body = await readBody(req);
-    const communityId = body.communityId;
-    const community = getCommunity(communityId);
-    if (!community) return sendJson(res, 404, { error: "Community not found." });
-    if (community.createdBy === user.username) return sendJson(res, 400, { error: "You already own this community." });
-
-    const existing = getRequest(communityId, user.username);
-    if (existing?.status === "pending") return sendJson(res, 409, { error: "Request already sent." });
-
-    upsertRequest(communityId, user.username, "pending");
-    return sendJson(res, 201, { requests: requestsForUser(user.username) });
-  }
-
-  if (req.method === "DELETE" && url.pathname === "/api/requests") {
-    const token = req.headers.authorization?.replace("Bearer ", "");
-    const user = getUserByToken(token);
-    if (!user) return sendJson(res, 401, { error: "Not logged in." });
-
-    const body = await readBody(req);
-    const communityId = body.communityId;
-    if (!communityId) return sendJson(res, 400, { error: "Community id is required." });
-
-    deleteRequest(communityId, user.username);
-    return sendJson(res, 200, { requests: requestsForUser(user.username) });
-  }
-
-  if (req.method === "GET" && url.pathname === "/api/requests/incoming") {
-    const token = req.headers.authorization?.replace("Bearer ", "");
-    const user = getUserByToken(token);
-    if (!user) return sendJson(res, 401, { error: "Not logged in." });
-    return sendJson(res, 200, { incomingRequests: incomingRequestsFor(user.username) });
-  }
-
-  if (req.method === "POST" && url.pathname === "/api/requests/respond") {
-    const token = req.headers.authorization?.replace("Bearer ", "");
-    const user = getUserByToken(token);
-    if (!user) return sendJson(res, 401, { error: "Not logged in." });
-
-    const body = await readBody(req);
-    const { communityId, username, accept } = body;
-    const community = getCommunity(communityId);
-    if (!community) return sendJson(res, 404, { error: "Community not found." });
-    if (community.createdBy !== user.username) return sendJson(res, 403, { error: "Only the community owner can respond to requests." });
-
-    const request = getRequest(communityId, username);
-    if (!request || request.status !== "pending") return sendJson(res, 404, { error: "Request not found." });
-
-    if (accept) {
-      upsertRequest(communityId, username, "accepted");
-      const requester = getUserByUsername(username);
-      if (requester) {
-        const nextJoined = new Set(requester.state.joined || []);
-        nextJoined.add(communityId);
-        requester.state.joined = [...nextJoined];
-        updateUser(username, requester);
-      }
-    } else {
-      deleteRequest(communityId, username);
-    }
-    return sendJson(res, 200, { incomingRequests: incomingRequestsFor(user.username), communities: allCommunities() });
   }
 
   if (req.method === "GET" && url.pathname === "/api/messages") {
