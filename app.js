@@ -597,7 +597,7 @@ function notifications() {
             : `<div class="notification"><div class="notif-icon"></div><div><h3>Belum ada notifikasi</h3><p class="subtle">Semua sudah dibaca.</p></div></div>`}
         </div>
         <div class="empty-panel card">
-          <h2>${items.length ? `${items.length} notifikasi baru` : "Empty state"}</h2>
+          <h2>${items.length ? `${items.length} notifikasi baru` : "Belum ada notifikasi nih"}</h2>
           <p class="subtle">${items.length ? "Tindak lanjuti request, chat, dan event dari sini." : "Kalau belum ada notifikasi, area ini menampilkan pesan kosong."}</p>
           <button class="btn gold" data-action="mark-read" style="margin-top: 48px">Mark all read</button>
         </div>
