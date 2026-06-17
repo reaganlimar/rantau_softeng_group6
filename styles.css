@@ -30,7 +30,8 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
   color: inherit;
 }
@@ -41,7 +42,8 @@ button {
 
 button:focus-visible,
 input:focus-visible,
-textarea:focus-visible {
+textarea:focus-visible,
+select:focus-visible {
   outline: 4px solid var(--gold);
   outline-offset: 2px;
 }
@@ -163,6 +165,7 @@ h3 {
 
 .field input,
 .field textarea,
+.field select,
 .search-input {
   width: 100%;
   border: var(--line);
@@ -542,8 +545,31 @@ h3 {
   margin: 22px 0;
 }
 
+.tab-row {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 18px 0 24px;
+}
+
 .search-input {
   max-width: 560px;
+}
+
+.filter-select {
+  display: grid;
+  gap: 6px;
+  font-weight: 900;
+}
+
+.filter-select select {
+  min-height: 52px;
+  min-width: 220px;
+  border: var(--line);
+  border-radius: 4px;
+  background: #fff;
+  padding: 10px 14px;
+  font-weight: 850;
 }
 
 .community-grid {
@@ -737,6 +763,10 @@ h3 {
   background: var(--lavender);
 }
 
+.notif-icon.pink {
+  background: var(--pink);
+}
+
 .empty-panel {
   padding: 28px;
   min-height: 340px;
@@ -818,6 +848,30 @@ h3 {
 
 .hidden {
   display: none;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 32px;
+  transform: translate(-50%, 12px);
+  max-width: min(90vw, 420px);
+  padding: 14px 22px;
+  border: var(--line);
+  border-radius: 5px;
+  background: var(--ink);
+  color: #fff;
+  font-weight: 850;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 50;
+}
+
+.toast.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
 }
 
 @media (max-width: 980px) {
