@@ -277,7 +277,7 @@ function dashboard() {
       <div class="panel hero-panel">
         <div>
           <h1>Temukan teman rantau yang satu frekuensi.</h1>
-          <p class="subtle">RantaU bantu kamu masuk ke komunitas yang cocok sebelum mulai kenalan.</p>
+          <p class="subtle">Yuk join komunitas yang cocok buat kamu...</p>
           <div class="actions">
             <button class="btn primary" data-route="communities">Cari komunitas</button>
             <button class="btn gold" data-route="notifications">Cek notifikasi</button>
